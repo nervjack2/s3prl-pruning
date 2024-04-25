@@ -7,6 +7,7 @@ import shutil
 import random
 import tempfile
 import importlib
+import yaml
 from pathlib import Path
 
 import torch
@@ -89,12 +90,30 @@ class Runner():
         self.args = args
         self.config = config
         self.init_ckpt = torch.load(self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
-
+        rows = self.init_ckpt.get('Rows')
+        self.ffn_dim = 3072 if not rows else rows 
+        print(f"FFN dimension = {self.ffn_dim}")
+        
         self.upstream = self._get_upstream()
         self.featurizer = self._get_featurizer()
         self.downstream = self._get_downstream()
-        self.all_entries = [self.upstream, self.featurizer, self.downstream]
+        self.all_entries = [self.upstream, self.featurizer, self.downstream]    
 
+        if self.args.mode == 'train' and self.args.prune_config:
+            from s3prl.upstream.melhubert_prune.rp_utils import RowPruningTools, set_prune_interval
+            with open(self.args.prune_config, 'r') as file:
+                prune_config = yaml.load(file, Loader=yaml.FullLoader)
+            self.row_tools = RowPruningTools(
+                self.args.device,
+                prune_config,
+                self.upstream.model,
+            )
+            self.total_prune_step = prune_config['total_steps']
+            self.prune_steps = set_prune_interval(
+                prune_interval=prune_config['interval'],
+                warm_up_steps=prune_config['warm_up'],  
+                total_prune_steps=prune_config['total_steps']
+            )
 
     def _load_weight(self, model, name):
         init_weight = self.init_ckpt.get(name)
@@ -150,6 +169,8 @@ class Runner():
             ckpt = ckpt_path,
             model_config = self.args.upstream_model_config,
             refresh = upstream_refresh,
+            rows=self.ffn_dim,
+            # new_state_dict=self.new_state_dict
         ).to(self.args.device)
 
         if is_initialized() and get_rank() == 0:
@@ -272,6 +293,9 @@ class Runner():
         records = defaultdict(list)
         epoch = self.init_ckpt.get('Epoch', 0)
         train_split = self.config['runner'].get("train_dataloader", "train")
+        gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
+        global_step = pbar.n+1
+
         while pbar.n < pbar.total:
             try:
                 dataloader = self.downstream.model.get_dataloader(train_split, epoch=epoch)
@@ -284,7 +308,7 @@ class Runner():
                     raise
 
             for batch_id, (wavs, *others) in enumerate(tqdm(dataloader, dynamic_ncols=True, desc='train', file=tqdm_file)):
-                # try/except block for forward/backward
+                # try/except block for forward/backward 
                 try:
                     if pbar.n >= pbar.total:
                         break
@@ -310,7 +334,6 @@ class Runner():
                         )
                     batch_ids.append(batch_id)
 
-                    gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
                     loss = (loss / gradient_accumulate_steps)
                     if amp:
                         scaler.scale(loss).backward()
@@ -357,10 +380,20 @@ class Runner():
                 if scheduler:
                     scheduler.step()
 
-                if not is_leader_process():
-                    batch_ids = []
-                    records = defaultdict(list)
-                    continue
+                # Pruning 
+                # first_accu = (backward_steps % gradient_accumulate_steps == 0) 
+                if self.args.mode == 'train' and self.args.prune_config:
+                    if global_step in self.prune_steps:
+                        print(global_step, self.prune_steps)
+                        # Save model before pruning
+                        self.save_model(f"states-prune-{self.ffn_dim}-tuned.ckpt", optimizer, global_step, epoch, scheduler)
+                        # Row pruning
+                        ffn_dim = self.row_tools.prune_api()       
+                        self.ffn_dim = ffn_dim
+                        # Redefine optimizer 
+                        optimizer = self._get_optimizer(trainable_models)
+
+                if not is_leader_process():pstream
 
                 # logging
                 if global_step % self.config['runner']['log_step'] == 0:
@@ -376,11 +409,11 @@ class Runner():
                     records = defaultdict(list)
 
                 # evaluation and save checkpoint
-                save_names = []
-
                 if global_step % self.config['runner']['eval_step'] == 0:
                     for split in self.config['runner']['eval_dataloaders']:
-                        save_names += self.evaluate(split, logger, global_step)
+                        save_names = self.evaluate(split, logger, global_step)
+                        for save_pth in save_names:
+                            self.save_model(save_pth, optimizer, global_step, epoch, scheduler)
 
                 if global_step % self.config['runner']['save_step'] == 0:
                     def check_ckpt_num(directory):
@@ -391,32 +424,11 @@ class Runner():
                             for ckpt_pth in ckpt_pths[:len(ckpt_pths) - max_keep + 1]:
                                 os.remove(ckpt_pth)
                     check_ckpt_num(self.args.expdir)
-                    save_names.append(f'states-{global_step}.ckpt')
+                    self.save_model(f'states-{global_step}.ckpt', optimizer, global_step, epoch, scheduler)
 
-                if len(save_names) > 0:
-                    all_states = {
-                        'Optimizer': optimizer.state_dict(),
-                        'Step': global_step,
-                        'Epoch': epoch,
-                        'Args': self.args,
-                        'Config': self.config,
-                    }
-
-                    for entry in self.all_entries:
-                        if entry.trainable:
-                            all_states[entry.name] = get_model_state(entry.model)
-
-                    if scheduler:
-                        all_states['Scheduler'] = scheduler.state_dict()
-
-                    if is_initialized():
-                        all_states['WorldSize'] = get_world_size()
-
-                    save_paths = [os.path.join(self.args.expdir, name) for name in save_names]
-                    tqdm.write(f'[Runner] - Save the checkpoint to:')
-                    for i, path in enumerate(save_paths):
-                        tqdm.write(f'{i + 1}. {path}')
-                        torch.save(all_states, path)
+                # Save last checkpoint 
+                if global_step == pbar.total:
+                    self.save_model(f"states-prune-{self.ffn_dim}-tuned.ckpt", optimizer, global_step, epoch, scheduler)
 
                 pbar.update(1)
             epoch += 1
@@ -428,6 +440,28 @@ class Runner():
         if is_leader_process():
             logger.close()
 
+    def save_model(self, save_name, optimizer, global_step, epoch, scheduler):
+        all_states = {
+            'Optimizer': optimizer.state_dict(),
+            'Step': global_step,
+            'Epoch': epoch,
+            'Args': self.args,
+            'Config': self.config,
+            'Rows': self.ffn_dim,
+        }
+        for entry in self.all_entries:
+            if entry.trainable:
+                all_states[entry.name] = get_model_state(entry.model)
+
+        if scheduler:
+            all_states['Scheduler'] = scheduler.state_dict()
+
+        if is_initialized():
+            all_states['WorldSize'] = get_world_size()
+
+        save_path = os.path.join(self.args.expdir, save_name)
+        tqdm.write(f'[Runner] - Save the checkpoint to: {save_path}')
+        torch.save(all_states, save_path)
 
     def evaluate(self, split=None, logger=None, global_step=0):
         """evaluate function will always be called on a single process even during distributed training"""
