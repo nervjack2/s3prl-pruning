@@ -1,8 +1,0 @@
-
-# total_steps: 20 # total pruning steps
-total_steps: 1 # total pruning steps
-num_rows_each_step: 2560
-# interval: [0, 25000, 50000, 75000, 100000, 125000, 150000, 175000, 200000, 
-#               225000, 250000, 275000, 300000, 325000, 350000, 375000, 400000, 425000, 450000, 475000]
-interval: [0]
-warm_up: 200000
