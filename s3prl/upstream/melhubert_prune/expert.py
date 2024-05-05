@@ -64,13 +64,14 @@ class UpstreamExpert(UpstreamBase):
         
         self.model = MelHuBERTModel(upstream_config)
         state_dict = all_states["model"]
+
         if new_state_dict:
             state_dict = new_state_dict
-        print(new_state_dict)
-        print(state_dict)
-        exit(0)
-        self.model.load_state_dict(state_dict)
-        
+            
+        try:
+            self.model.load_state_dict(state_dict)
+        except:
+            pass
         # Load the mean and std of LibriSpeech 360 hours 
         self.mean, self.std = load_mean_std(mean_std_npy_path)
         

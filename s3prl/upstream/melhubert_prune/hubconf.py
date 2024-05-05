@@ -12,7 +12,7 @@ def compression_20ms_row_pruning_960hours_local(ckpt, *args, **kwargs):
         ckpt (str): PATH
     """
     mean_std_npy_path = '/home/nervjack2/libri-with-cluster/np/libri-960-np-normalize/mean-std.npy'
-    assert os.path.isfile(ckpt)
+    # assert os.path.isfile(ckpt)
     return _UpstreamExpert(ckpt, mode='row-pruning', fp=20, mean_std_npy_path=mean_std_npy_path, *args, **kwargs)
 
 def compression_10ms_row_pruning_960hours_local(ckpt, *args, **kwargs):

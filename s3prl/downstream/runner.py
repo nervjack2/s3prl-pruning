@@ -91,6 +91,7 @@ class Runner():
         self.config = config
         self.init_ckpt = torch.load(self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
         rows = self.init_ckpt.get('Rows')
+        self.new_state_dict = self.init_ckpt.get('Upstream')
         self.ffn_dim = 3072 if not rows else rows 
         print(f"FFN dimension = {self.ffn_dim}")
         
@@ -119,8 +120,10 @@ class Runner():
         init_weight = self.init_ckpt.get(name)
         if init_weight:
             show(f'[Runner] - Loading {name} weights from the previous experiment')
-            model.load_state_dict(init_weight)
-
+            try:
+                model.load_state_dict(init_weight)
+            except:
+                print(f"Could not load model state dict for {name}")
 
     def _init_model(self, model, name, trainable, interfaces=None):
         for interface in interfaces or []:
@@ -170,7 +173,7 @@ class Runner():
             model_config = self.args.upstream_model_config,
             refresh = upstream_refresh,
             rows=self.ffn_dim,
-            # new_state_dict=self.new_state_dict
+            new_state_dict=self.new_state_dict
         ).to(self.args.device)
 
         if is_initialized() and get_rank() == 0:
@@ -220,13 +223,14 @@ class Runner():
         )
 
 
-    def _get_optimizer(self, model_params):
+    def _get_optimizer(self, model_params, load_weight=True):
         optimizer = get_optimizer(
             model_params, 
             self.config['runner']['total_steps'],
             self.config['optimizer']
         )
-        self._load_weight(optimizer, 'Optimizer')
+        if load_weight:
+            self._load_weight(optimizer, 'Optimizer')
         return optimizer
 
 
@@ -279,7 +283,7 @@ class Runner():
 
         # progress bar
         tqdm_file = sys.stderr if is_leader_process() else open(os.devnull, 'w')
-        pbar = tqdm(total=self.config['runner']['total_steps'], dynamic_ncols=True, desc='overall', file=tqdm_file)
+        pbar = tqdm(total=self.config['runner']['total_steps']+self.args.extra_steps, dynamic_ncols=True, desc='overall', file=tqdm_file)
         init_step = self.init_ckpt.get('Step')
         if init_step:
             pbar.n = init_step
@@ -386,12 +390,12 @@ class Runner():
                     if global_step in self.prune_steps:
                         print(global_step, self.prune_steps)
                         # Save model before pruning
-                        self.save_model(f"states-prune-{self.ffn_dim}-tuned.ckpt", optimizer, global_step, epoch, scheduler)
+                        self.save_model(f"States-prune-{self.ffn_dim}-tuned.ckpt", optimizer, global_step, epoch, scheduler)
                         # Row pruning
                         ffn_dim = self.row_tools.prune_api()       
                         self.ffn_dim = ffn_dim
                         # Redefine optimizer 
-                        optimizer = self._get_optimizer(trainable_models)
+                        optimizer = self._get_optimizer(trainable_models, load_weight=False)
 
                 if not is_leader_process():pstream
 
@@ -428,7 +432,7 @@ class Runner():
 
                 # Save last checkpoint 
                 if global_step == pbar.total:
-                    self.save_model(f"states-prune-{self.ffn_dim}-tuned.ckpt", optimizer, global_step, epoch, scheduler)
+                    self.save_model(f"States-prune-{self.ffn_dim}-tuned.ckpt", optimizer, global_step, epoch, scheduler)
 
                 pbar.update(1)
             epoch += 1

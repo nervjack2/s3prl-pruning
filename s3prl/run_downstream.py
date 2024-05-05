@@ -84,6 +84,7 @@ def get_downstream_args():
     parser.add_argument('--verbose', action='store_true', help='Print model infomation')
     parser.add_argument('--disable_cudnn', action='store_true', help='Disable CUDNN')
     parser.add_argument('--prune_config', help='Config for row pruning', default=None)
+    parser.add_argument('--extra_steps', help='Number of extra steps for training', default=0, type=int)
 
     args = parser.parse_args()
     backup_files = []
@@ -127,6 +128,7 @@ def get_downstream_args():
             'backend', 'local_rank', 'past_exp',
             'device'
         ]
+        
         args = update_args(args, ckpt['Args'], preserve_list=cannot_overwrite_args)
         os.makedirs(args.expdir, exist_ok=True)
         args.init_ckpt = ckpt_pth
@@ -147,7 +149,7 @@ def get_downstream_args():
     if args.override is not None and args.override.lower() != "none":
         override(args.override, args, config)
         os.makedirs(args.expdir, exist_ok=True)
-    
+
     return args, config, backup_files
 
 
