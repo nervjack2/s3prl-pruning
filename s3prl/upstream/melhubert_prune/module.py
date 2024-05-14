@@ -110,8 +110,10 @@ class TransformerSentenceEncoderLayer(nn.Module):
             residual = x
             x = self.final_layer_norm(x)
             x = self.activation_fn(self.fc1(x))
+            fc1 = x 
             x = self.dropout2(x)
             x = self.fc2(x)
+            fc2 = x 
             x = self.dropout3(x)
             x = residual + x
         else:
@@ -127,13 +129,15 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
             residual = x
             x = self.activation_fn(self.fc1(x))
+            fc1 = x 
             x = self.dropout2(x)
             x = self.fc2(x)
+            fc2 = x 
             x = self.dropout3(x)
             x = residual + x
             x = self.final_layer_norm(x)
         
-        return x, attn
+        return x, attn, fc1, fc2
 
 
 class TransformerEncoder(nn.Module):
@@ -142,6 +146,7 @@ class TransformerEncoder(nn.Module):
 
         self.dropout = args.dropout
         self.embedding_dim = args.encoder_embed_dim
+        assert type(args.encoder_ffn_embed_dim) == list
         self.ffn_embedding_dim = args.encoder_ffn_embed_dim
 
         self.pos_emb_type = args.pos_emb_type
@@ -198,7 +203,7 @@ class TransformerEncoder(nn.Module):
             [
                 TransformerSentenceEncoderLayer(
                     embedding_dim=self.embedding_dim,
-                    ffn_embedding_dim=args.encoder_ffn_embed_dim,
+                    ffn_embedding_dim=args.encoder_ffn_embed_dim[idx],
                     num_attention_heads=args.encoder_attention_heads,
                     dropout=self.dropout,
                     attention_dropout=args.attention_dropout,
@@ -207,7 +212,7 @@ class TransformerEncoder(nn.Module):
                     layer_norm_first=args.layer_norm_first,
                     attention_type=args.attention_type,
                 )
-                for _ in range(args.encoder_layers)
+                for idx in range(args.encoder_layers)
             ]
         )
 
@@ -218,14 +223,14 @@ class TransformerEncoder(nn.Module):
         self.apply(init_bert_params)
 
     def forward(self, x, padding_mask=None, attn_mask=None, get_hidden=False):
-        x, layer_results = self.extract_features(
+        x, layer_results, fc_results = self.extract_features(
             x, padding_mask, attn_mask, get_hidden=get_hidden
         )
 
         if self.layer_norm_first:
             x = self.layer_norm(x)
 
-        return x, layer_results
+        return x, layer_results, fc_results
 
     def extract_features(self, x, padding_mask=None, attn_mask=None, get_hidden=False):
         if padding_mask is not None:
@@ -244,10 +249,11 @@ class TransformerEncoder(nn.Module):
         x = x.transpose(0, 1)
 
         layer_results = []
+        fc_results = []
         for i, layer in enumerate(self.layers):
             dropout_probability = np.random.random()
             if not self.training or (dropout_probability > self.layerdrop):
-                x, z = layer(
+                x, z, fc1, fc2 = layer(
                     x,
                     self_attn_padding_mask=padding_mask,
                     need_weights=False,
@@ -255,8 +261,8 @@ class TransformerEncoder(nn.Module):
                 )
                 if get_hidden:
                     layer_results.append(x.transpose(0, 1))
-    
+            fc_results.append((fc1,fc2))
         # T x B x C -> B x T x C
         x = x.transpose(0, 1)
     
-        return x, layer_results
+        return x, layer_results, fc_results

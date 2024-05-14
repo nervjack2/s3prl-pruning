@@ -91,8 +91,11 @@ class Runner():
         self.config = config
         self.init_ckpt = torch.load(self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
         rows = self.init_ckpt.get('Rows')
+        if not rows:
+            rows = 3072
         self.new_state_dict = self.init_ckpt.get('Upstream')
-        self.ffn_dim = 3072 if not rows else rows 
+        
+        self.ffn_dim = [rows for i in range(12)] if type(rows) == int else rows
         print(f"FFN dimension = {self.ffn_dim}")
         
         self.upstream = self._get_upstream()
@@ -109,12 +112,13 @@ class Runner():
                 prune_config,
                 self.upstream.model,
             )
-            self.total_prune_step = prune_config['total_steps']
+            self.total_prune_step = prune_config["prune"]['total_steps']
             self.prune_steps = set_prune_interval(
-                prune_interval=prune_config['interval'],
-                warm_up_steps=prune_config['warm_up'],  
-                total_prune_steps=prune_config['total_steps']
+                prune_interval=prune_config["prune"]['interval'],
+                warm_up_steps=prune_config["prune"]['warm_up'],  
+                total_prune_steps=prune_config["prune"]['total_steps']
             )
+            print(f"Prune steps={self.prune_steps}")
 
     def _load_weight(self, model, name):
         init_weight = self.init_ckpt.get(name)
@@ -287,10 +291,13 @@ class Runner():
         init_step = self.init_ckpt.get('Step')
         if init_step:
             pbar.n = init_step
+        self.save_dir = self.args.expdir if self.args.save_dir is None else self.args.save_dir
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
 
         # Tensorboard logging
         if is_leader_process():
-            logger = SummaryWriter(self.args.expdir)
+            logger = SummaryWriter(self.save_dir)
 
         batch_ids = []
         backward_steps = 0
@@ -390,14 +397,18 @@ class Runner():
                     if global_step in self.prune_steps:
                         print(global_step, self.prune_steps)
                         # Save model before pruning
-                        self.save_model(f"States-prune-{self.ffn_dim}-tuned.ckpt", optimizer, global_step, epoch, scheduler)
+                        mean_ffn_dim = sum(self.ffn_dim)//len(self.ffn_dim)
+                        self.save_model(f"States-prune-{mean_ffn_dim}-tuned.ckpt", optimizer, global_step, epoch, scheduler)
                         # Row pruning
                         ffn_dim = self.row_tools.prune_api()       
                         self.ffn_dim = ffn_dim
                         # Redefine optimizer 
                         optimizer = self._get_optimizer(trainable_models, load_weight=False)
 
-                if not is_leader_process():pstream
+                if not is_leader_process():
+                    batch_ids = []
+                    records = defaultdict(list)
+                    continue
 
                 # logging
                 if global_step % self.config['runner']['log_step'] == 0:
@@ -427,12 +438,13 @@ class Runner():
                             ckpt_pths = sorted(ckpt_pths, key=lambda pth: int(pth.split('-')[-1].split('.')[0]))
                             for ckpt_pth in ckpt_pths[:len(ckpt_pths) - max_keep + 1]:
                                 os.remove(ckpt_pth)
-                    check_ckpt_num(self.args.expdir)
+                    check_ckpt_num(self.save_dir)
                     self.save_model(f'states-{global_step}.ckpt', optimizer, global_step, epoch, scheduler)
 
                 # Save last checkpoint 
                 if global_step == pbar.total:
-                    self.save_model(f"States-prune-{self.ffn_dim}-tuned.ckpt", optimizer, global_step, epoch, scheduler)
+                    mean_ffn_dim = sum(self.ffn_dim)//len(self.ffn_dim)
+                    self.save_model(f"States-prune-{mean_ffn_dim}-tuned.ckpt", optimizer, global_step, epoch, scheduler)
 
                 pbar.update(1)
             epoch += 1
@@ -463,7 +475,7 @@ class Runner():
         if is_initialized():
             all_states['WorldSize'] = get_world_size()
 
-        save_path = os.path.join(self.args.expdir, save_name)
+        save_path = os.path.join(self.save_dir, save_name)
         tqdm.write(f'[Runner] - Save the checkpoint to: {save_path}')
         torch.save(all_states, save_path)
 
@@ -592,7 +604,7 @@ class Runner():
 
         # Download repo
         HF_HUB_DIR = "hf_hub"
-        REPO_ROOT_DIR = os.path.join(self.args.expdir, HF_HUB_DIR, repo_name)
+        REPO_ROOT_DIR = os.path.join(self.save_dir, HF_HUB_DIR, repo_name)
         REPO_TASK_DIR = os.path.join(REPO_ROOT_DIR, self.args.downstream, self.args.expname)
         print(f"[Runner] - Cloning Hub repo to {REPO_ROOT_DIR}")
         model_repo = Repository(
@@ -604,7 +616,7 @@ class Runner():
         # Copy checkpoints, tensorboard logs, and args / configs
         # Note that this copies all files from the experiment directory,
         # including those from multiple runs
-        shutil.copytree(self.args.expdir, REPO_TASK_DIR, dirs_exist_ok=True, ignore=shutil.ignore_patterns(HF_HUB_DIR))
+        shutil.copytree(self.save_dir, REPO_TASK_DIR, dirs_exist_ok=True, ignore=shutil.ignore_patterns(HF_HUB_DIR))
 
         # By default we use model.ckpt in the PreTrainedModel interface, so
         # rename the best checkpoint to match this convention

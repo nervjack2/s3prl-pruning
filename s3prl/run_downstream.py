@@ -85,6 +85,7 @@ def get_downstream_args():
     parser.add_argument('--disable_cudnn', action='store_true', help='Disable CUDNN')
     parser.add_argument('--prune_config', help='Config for row pruning', default=None)
     parser.add_argument('--extra_steps', help='Number of extra steps for training', default=0, type=int)
+    parser.add_argument('--save_dir', help='Directly specify where to save the checkpoint.', type=str)
 
     args = parser.parse_args()
     backup_files = []

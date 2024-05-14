@@ -28,7 +28,7 @@ class MelHuBERTConfig:
         # Transformer encoder
         self.encoder_layers = int(config.get("encoder_layers", 1))
         self.encoder_embed_dim = int(config.get("encoder_embed_dim", 768))
-        self.encoder_ffn_embed_dim = int(config.get("encoder_ffn_embed_dim", 3072))
+        self.encoder_ffn_embed_dim = config.get("encoder_ffn_embed_dim", 3072)
         self.encoder_attention_heads = int(config.get("encoder_attention_heads", 12))
         self.activation_fn = str(config.get("activation_fn", "gelu"))
         self.layer_norm_first = bool(config.get("layer_norm_first", False))
@@ -178,11 +178,11 @@ class MelHuBERTModel(nn.Module):
         
         layer_hiddens = []
         if self.model_config.encoder_layers > 0:
-            hidden, layer_hiddens = self.encoder(
+            hidden, layer_hiddens, fc_results = self.encoder(
                 x, ~pad_mask.bool(), get_hidden=get_hidden, attn_mask=attn_mask
             )
         else:
             hidden = self.encoder(x)
         
         if no_pred:
-            return hidden, None, None, None, None, layer_hiddens, pre_feat, mask_indices
+            return hidden, None, None, None, None, layer_hiddens, pre_feat, fc_results
